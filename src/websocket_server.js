@@ -74,19 +74,17 @@ const parseFrames = (buffer, onFrame) => {
     let pos = offset + 2;
 
     // check length of the payload data
-    if (len === 126){
-      
+    if (len === 126) {
       if (buffer.length - pos < 2) break;
       len = buffer.readUInt16BE(pos);
       pos += 2;
     } else if (len === 127) {
-      
       if (buffer.length - pos < 8) break;
       const x = buffer.readUInt32BE(pos);
       const y = buffer.readUInt32BE(pos + 4);
       pos += 8;
 
-      if (x!==0) {
+      if (x !== 0) {
         throw new Error("Frame size exceeds 4GB limit!");
       }
       len = x >>> 0;
@@ -110,7 +108,7 @@ const parseFrames = (buffer, onFrame) => {
       payload = output;
     }
 
-    const frame = { fin, opcode, payload } // full frame
+    const frame = { fin, opcode, payload }; // full frame
 
     onFrame(frame);
     offset = pos + len;
@@ -120,27 +118,34 @@ const parseFrames = (buffer, onFrame) => {
 
 /* this function will be executed as soon as upgrade protocol hits the server */
 server.on("upgrade", (req, socket, head) => {
-
   const upgrade = (req.headers.upgrade || "").toLowerCase(); // tells which protocol to upgrade to
 
   // tells that particular connection is now a request to upgrade it
-  const connection = (req.headers.connection || "").toLowerCase(); 
+  const connection = (req.headers.connection || "").toLowerCase();
 
   const key = req.headers["sec-websocket-key"];
   const version = req.headers["sec-websocket-version"];
 
   // validate if handshake is valid or not
-  const ok = upgrade === "websocket" && connection.split(/,\s*/).includes("upgrade") && key && version === "13";
+  const ok =
+    upgrade === "websocket" &&
+    connection.split(/,\s*/).includes("upgrade") &&
+    key &&
+    version === "13";
 
-  if(!ok) {
+  if (!ok) {
     socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
     socket.destroy();
     return;
   }
 
-  const accept = crypto.createHash("sha1").update(key + WEBSOCKET_GUID).digest("base64"); // complete the upgrade
+  const accept = crypto
+    .createHash("sha1")
+    .update(key + WEBSOCKET_GUID)
+    .digest("base64"); // complete the upgrade
 
-  const responseHeaders = [ "HTTP/1.1 101 Switching Protocols",
+  const responseHeaders = [
+    "HTTP/1.1 101 Switching Protocols",
     "Upgrade: websocket",
     "Connection: Upgrade",
     `Sec-WebSocket-Accept: ${accept}`,
@@ -148,11 +153,81 @@ server.on("upgrade", (req, socket, head) => {
   ];
 
   socket.write(responseHeaders.join("\r\n"));
-  socket.setNoDelay(
-    true
-  ); // bypass the nagle's algorithm
+  socket.setNoDelay(true); // bypass the nagle's algorithm
 
   // <---- upgradation ends here ---->
 
+  let leftover = head && head.length ? Buffer.from(head) : Buffer.alloc(0);
+  /* ensure leftOverHeaders always a buffer.
+  if head exists and is non-empty, wrap it in a buffer
+  otherwise, use an empty buffer. */
+  
+  let textBuf = null;
+  
+  const onFrame = (wsFrame) => {
+    switch (wsFrame.opcode) {
+      case OPC.TEXT: {
+        textBuf = textBuf
+          ? Buffer.concat([textBuf, wsFrame.payload])
+          : wsFrame.payload;
 
-})
+        if (wsFrame.fin) {
+          const msg = textBuf.toString("utf8");
+          console.log(`Client has sent a message: ${msg}`);
+          send(socket, OPC.TEXT, Buffer.from(msg, "utf8")); // brodcast it back to the client
+          textBuf = null;
+        }
+        break;
+      }
+      case OPC.CONT: {
+        if (!textBuf) textBuf = Buffer.alloc(0);
+        textBuf = Buffer.concat([textBuf, wsFrame.payload]);
+        if (fin) {
+          const msg = textBuf.toString("utf8");
+          console.log(`Client has sent a message: ${msg}`);
+          send(socket, OPC.TEXT, Buffer.from(msg, "utf8")); // brodcast it back to the client
+          textBuf = null;
+        }
+        break;
+      }
+      case OPC.BIN:
+        console.log(`Client BIN ${wsframe.payload.length} bytes`);
+        send(socket, OPC.BIN, wsFrame.payload); // optional echo
+        break;
+      case OPC.PING:
+        send(socket, OPC.PONG, wsFrame.payload);
+        break;
+      case OPC.CLOSE:
+        // echo close and end tcp socket
+        socket.write(
+          buildFrame({ opcode: OPC.CLOSE, payload: wsFrame.payload })
+        );
+        socket.end();
+        break;
+      default:
+        break;
+    }
+  };
+
+  const onBytes = (chunk) => {
+    /* chunk is raw bytes of data */
+    leftover = Buffer.concat([leftover, chunk]); // if any left overs, concatinate it with the new data
+
+    try {
+      leftover = parseFrames(leftover, onFrame);
+    } catch (error) {}
+  };
+
+  if (leftover.length) {
+    onBytes(Buffer.alloc(0));
+  }
+
+  socket.on("data", onBytes);
+  socket.on("end", () => socket.end());
+  socket.on("error", () => socket.destroy());
+});
+
+const PORT = 8080;
+server.listen(PORT, () => {
+  console.log(`WebSocket Server listening on port:${PORT}`);
+});
