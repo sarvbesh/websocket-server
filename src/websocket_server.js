@@ -117,3 +117,42 @@ const parseFrames = (buffer, onFrame) => {
   }
   return buffer.subarray(offset);
 };
+
+/* this function will be executed as soon as upgrade protocol hits the server */
+server.on("upgrade", (req, socket, head) => {
+
+  const upgrade = (req.headers.upgrade || "").toLowerCase(); // tells which protocol to upgrade to
+
+  // tells that particular connection is now a request to upgrade it
+  const connection = (req.headers.connection || "").toLowerCase(); 
+
+  const key = req.headers["sec-websocket-key"];
+  const version = req.headers["sec-websocket-version"];
+
+  // validate if handshake is valid or not
+  const ok = upgrade === "websocket" && connection.split(/,\s*/).includes("upgrade") && key && version === "13";
+
+  if(!ok) {
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  const accept = crypto.createHash("sha1").update(key + WEBSOCKET_GUID).digest("base64"); // complete the upgrade
+
+  const responseHeaders = [ "HTTP/1.1 101 Switching Protocols",
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Accept: ${accept}`,
+    "\r\n",
+  ];
+
+  socket.write(responseHeaders.join("\r\n"));
+  socket.setNoDelay(
+    true
+  ); // bypass the nagle's algorithm
+
+  // <---- upgradation ends here ---->
+
+
+})
